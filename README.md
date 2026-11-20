@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.png" width="128" alt="Logo TALdoc"></p>
+
 # TALdoc Desktop
 
 App per Windows che legge i tuoi documenti **in locale** e ti permette di interrogarli con un'intelligenza artificiale che gira sul tuo PC (tramite [Ollama](https://ollama.com)).
@@ -8,6 +10,11 @@ Nessun dato viene inviato online. Pensata per ragionieri, commercialisti e profe
 ## Cosa fa
 
 - **Domande libere** sui documenti caricati (totali, fornitori, date, riassunti…)
+- **Tag con @**: scrivi `@` nella chat e scegli un documento dal menu per fare domande solo su quello
+  o confrontarne due. Nel menu ci sono anche le **azioni rapide**: Confronta due Excel,
+  Confronta due documenti, Verifica i conti di un documento, Riassumi ed estrai i dati chiave
+- **Card colorate** per ogni documento: bordo acceso, interno sfumato dello stesso colore,
+  estensione al centro e titolo sotto (clic sulla card = cita il documento, ✕ = rimuovi)
 - **Verifica conti**: quantità × prezzo, imponibile + IVA, somma righe = totale
 - **Confronta 2 documenti** e mostra le differenze (testo, importi, date)
 - **Modifica e salva copia** di un file Word con l'AI, con anteprima prima del salvataggio

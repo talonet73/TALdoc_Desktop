@@ -66,21 +66,12 @@ OLLAMA_URL = "http://localhost:11434"
 DEFAULT_MODEL = "qwen2.5:3b"  # leggero, buon rapporto
 
 BORDER_COLORS = {
-    "word": "#3B82F6",
-    "powerpoint": "#F97316",
-    "pdf": "#EF4444",
-    "excel": "#22C55E",
-    "txt": "#EAB308",
-    "other": "#94A3B8"
-}
-
-TYPE_ICONS = {
-    "word": "W",
-    "powerpoint": "P",
-    "pdf": "PDF",
-    "excel": "X",
-    "txt": "TXT",
-    "other": "IMG"
+    "word": "#1F6BFF",
+    "powerpoint": "#FF6A00",
+    "pdf": "#FF1F3D",
+    "excel": "#00B341",
+    "txt": "#FFC400",
+    "other": "#8B5CF6"
 }
 
 MANUALE = """
@@ -106,15 +97,32 @@ Tutto resta sul tuo PC. Nessun dato viene inviato online.
 Clicca "Carica documenti" nella barra laterale e seleziona uno o più file.
 Formati supportati: PDF, Word, Excel, CSV, PowerPoint, TXT, immagini (JPG, PNG...).
 
-I documenti appaiono in fila orizzontale con un bordo colorato:
+I documenti appaiono in fila orizzontale, ognuno con il bordo del suo colore,
+l'estensione al centro e il titolo sotto:
 - Blu = Word
 - Arancione = PowerPoint
 - Rosso = PDF
 - Verde = Excel/CSV
 - Giallo = TXT
+- Viola = immagini e altri formati
+Per togliere un documento clicca sulla ✕ in alto a destra della card.
 
 4. FARE DOMANDE
 Scrivi una domanda nel box e premi "Chiedi" o Invio.
+
+4b. CITARE UN DOCUMENTO CON @
+Scrivi @ (o premi il pulsante @ accanto a "Chiedi"): si apre un menu con i documenti caricati,
+ognuno con la sua estensione e il titolo. Sceglilo con il mouse o con le frecce + Invio.
+La domanda verrà fatta solo sui documenti citati, così puoi interrogarne uno in particolare
+o confrontarne due (es. "Che differenze ci sono tra @offerta_A.pdf e @offerta_B.pdf?").
+Puoi anche cliccare su una card per citarla.
+
+Nel menu trovi anche le AZIONI RAPIDE:
+- Confronta due Excel
+- Confronta due documenti
+- Verifica i conti di un documento
+- Riassumi ed estrai i dati chiave
+Scegli l'azione e poi i documenti richiesti: la domanda completa si scrive da sola.
 Esempi:
 - Qual è il totale della fattura?
 - Controlla se quantità × prezzo torna su tutte le righe
@@ -413,6 +421,227 @@ def format_seconds(s: float) -> str:
 
 
 # ---------------------------------------------------------------------------
+#  Grafica disegnata al volo con Pillow: logo glossy e card dei documenti
+# ---------------------------------------------------------------------------
+try:
+    from PIL import ImageDraw, ImageFont, ImageFilter
+except ImportError:
+    ImageDraw = ImageFont = ImageFilter = None
+
+
+def _hex_rgb(h: str):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def _mix(c1, c2, t: float):
+    return tuple(int(a + (b - a) * t) for a, b in zip(c1, c2))
+
+
+_FONT_CACHE = {}
+
+
+def pil_font(size: int, bold: bool = False):
+    key = (size, bold)
+    if key in _FONT_CACHE:
+        return _FONT_CACHE[key]
+    names = (["segoeuib.ttf", "arialbd.ttf", "DejaVuSans-Bold.ttf",
+              "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"] if bold else
+             ["segoeui.ttf", "arial.ttf", "DejaVuSans.ttf",
+              "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"])
+    font = None
+    for n in names:
+        for path in (n, os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", n)):
+            try:
+                font = ImageFont.truetype(path, size)
+                break
+            except Exception:
+                continue
+        if font:
+            break
+    if font is None:
+        try:
+            font = ImageFont.load_default(size)
+        except Exception:
+            font = ImageFont.load_default()
+    _FONT_CACHE[key] = font
+    return font
+
+
+def make_logo(size: int = 256):
+    """Logo TALdoc: tessera arrotondata con gradiente viola-fucsia, documento e riflesso glossy."""
+    if Image is None or ImageDraw is None:
+        return None
+    S = size * 4  # disegno in alta risoluzione e poi riduco (bordi morbidi)
+    r = int(S * 0.24)
+
+    # gradiente diagonale
+    c1, c2, c3 = _hex_rgb("#4F46E5"), _hex_rgb("#9333EA"), _hex_rgb("#EC4899")
+    grad = Image.new("RGB", (S, S))
+    gp = grad.load()
+    step = 4
+    for y in range(0, S, step):
+        for x in range(0, S, step):
+            t = (x + y) / (2 * S)
+            col = _mix(c1, c2, t * 2) if t < 0.5 else _mix(c2, c3, (t - 0.5) * 2)
+            for dy in range(step):
+                for dx in range(step):
+                    gp[x + dx, y + dy] = col
+    mask = Image.new("L", (S, S), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, S - 1, S - 1), r, fill=255)
+    logo = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    logo.paste(grad, (0, 0), mask)
+
+    d = ImageDraw.Draw(logo)
+    # ombra del documento
+    shadow = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(shadow)
+    dx0, dy0, dx1, dy1 = int(S * .27), int(S * .19), int(S * .73), int(S * .83)
+    sd.rounded_rectangle((dx0 + S * .02, dy0 + S * .035, dx1 + S * .02, dy1 + S * .035),
+                         int(S * .06), fill=(30, 10, 60, 110))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(S * .025))
+    logo.alpha_composite(shadow)
+    d = ImageDraw.Draw(logo)
+
+    # documento bianco con angolo piegato
+    fold = int(S * .14)
+    d.rounded_rectangle((dx0, dy0, dx1, dy1), int(S * .06), fill=(255, 255, 255, 255))
+    d.polygon([(dx1 - fold, dy0), (dx1 + 2, dy0), (dx1 + 2, dy0 + fold)], fill=(0, 0, 0, 0))
+    logo_px = logo.load()
+    # ripristina il gradiente nell'angolo tagliato
+    for y in range(dy0, dy0 + fold + 3):
+        for x in range(dx1 - fold, dx1 + 3):
+            if x - (dx1 - fold) > (y - dy0) and logo_px[x, y][3] == 0 and mask.getpixel((x, y)):
+                logo_px[x, y] = grad.getpixel((x, y)) + (255,)
+    d.polygon([(dx1 - fold, dy0), (dx1 - fold, dy0 + fold), (dx1, dy0 + fold)],
+              fill=(214, 204, 255, 255))
+
+    # righe di testo + "T" in gradiente
+    tx = dx0 + int(S * .07)
+    d.rounded_rectangle((tx, int(S * .30), tx + int(S * .17), int(S * .345)), int(S * .02),
+                        fill=_hex_rgb("#7C3AED") + (255,))
+    d.rounded_rectangle((tx + int(S * .06), int(S * .30), tx + int(S * .11), int(S * .55)),
+                        int(S * .02), fill=_hex_rgb("#7C3AED") + (255,))
+    for i, w in enumerate((.25, .29, .21)):
+        y = int(S * (.61 + i * .065))
+        d.rounded_rectangle((tx, y, tx + int(S * w), y + int(S * .03)), int(S * .015),
+                            fill=(196, 181, 253, 255))
+    # scintilla AI
+    cx, cy, k = int(S * .62), int(S * .42), S * .085
+    star = [(cx, cy - k), (cx + k * .28, cy - k * .28), (cx + k, cy), (cx + k * .28, cy + k * .28),
+            (cx, cy + k), (cx - k * .28, cy + k * .28), (cx - k, cy), (cx - k * .28, cy - k * .28)]
+    d.polygon(star, fill=_hex_rgb("#EC4899") + (255,))
+
+    # riflesso glossy sulla metà superiore
+    gloss = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    gl = gloss.load()
+    gmask = Image.new("L", (S, S), 0)
+    ImageDraw.Draw(gmask).ellipse((-S * .35, -S * .75, S * 1.35, S * .48), fill=255)
+    for y in range(0, int(S * .5)):
+        a = int(150 * (1 - y / (S * .5)) ** 1.2)
+        for x in range(0, S, 2):
+            if gmask.getpixel((x, y)) and mask.getpixel((x, y)):
+                gl[x, y] = (255, 255, 255, a)
+                if x + 1 < S:
+                    gl[x + 1, y] = (255, 255, 255, a)
+    logo.alpha_composite(gloss)
+    # bordo luminoso sottile
+    ImageDraw.Draw(logo).rounded_rectangle((2, 2, S - 3, S - 3), r, outline=(255, 255, 255, 70),
+                                           width=max(2, S // 90))
+    return logo.resize((size, size), Image.LANCZOS)
+
+
+CARD_W, CARD_H = 170, 134
+
+
+def doc_title(doc) -> str:
+    """Titolo del file mostrato in card e nel menu @ (nome senza estensione)."""
+    return Path(doc.name).stem or doc.name
+
+
+def wrap_title(d, text, font, max_w, max_lines):
+    """Va a capo preferibilmente su spazi, '_' o '-'; aggiunge … se il testo è troppo lungo."""
+    tokens = [t for t in re.split(r"(?<=[ _\-.])", text) if t]
+    pieces = []
+    for t in tokens:  # spezza i token troppo lunghi
+        while d.textlength(t, font=font) > max_w:
+            n = len(t)
+            while n > 1 and d.textlength(t[:n], font=font) > max_w:
+                n -= 1
+            pieces.append(t[:n])
+            t = t[n:]
+        pieces.append(t)
+    lines, cur = [], ""
+    for i, t in enumerate(pieces):
+        if d.textlength(cur + t, font=font) <= max_w:
+            cur += t
+        else:
+            lines.append(cur)
+            cur = t
+    if cur:
+        lines.append(cur)
+    lines = [l.strip() for l in lines]
+    if len(lines) > max_lines:
+        last = lines[max_lines - 1]
+        while last and d.textlength(last + "…", font=font) > max_w:
+            last = last[:-1]
+        lines = lines[:max_lines - 1] + [last.rstrip(" _-.") + "…"]
+    return lines
+
+
+def make_card(doc, hover: bool = False):
+    """Card documento: bordo acceso, interno con gradiente molto chiaro dello stesso colore,
+    estensione al centro e titolo sotto."""
+    if Image is None or ImageDraw is None:
+        return None
+    k = 3
+    W, H = CARD_W * k, CARD_H * k
+    base = _hex_rgb(doc.border_color)
+    white = (255, 255, 255)
+    top = _mix(base, white, 0.80 if not hover else 0.72)
+    bottom = _mix(base, white, 0.95 if not hover else 0.88)
+
+    grad = Image.new("RGB", (W, H))
+    gd = ImageDraw.Draw(grad)
+    for y in range(H):
+        gd.line([(0, y), (W, y)], fill=_mix(top, bottom, y / H))
+    mask = Image.new("L", (W, H), 0)
+    rad = 16 * k
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, W - 1, H - 1), rad, fill=255)
+    card = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    card.paste(grad, (0, 0), mask)
+    d = ImageDraw.Draw(card)
+    bw = 3 * k
+    d.rounded_rectangle((bw // 2, bw // 2, W - 1 - bw // 2, H - 1 - bw // 2), rad, outline=base, width=bw)
+
+    # estensione al centro
+    ext = (doc.ext.lstrip(".") or "FILE").upper()
+    f_ext = pil_font(30 * k if len(ext) <= 4 else 24 * k, bold=True)
+    tw = d.textlength(ext, font=f_ext)
+    d.text(((W - tw) / 2, 30 * k), ext, font=f_ext, fill=base)
+
+    # titolo sotto (max 2 righe)
+    f_name = pil_font(11 * k, bold=True)
+    max_w = W - 24 * k
+    lines = wrap_title(d, doc_title(doc), f_name, max_w, 2)
+    text_col = _mix(base, (15, 23, 42), 0.75)
+    y = 82 * k
+    for line in lines[:2]:
+        lw = d.textlength(line, font=f_name)
+        d.text(((W - lw) / 2, y), line, font=f_name, fill=text_col)
+        y += 15 * k
+
+    # pulsante chiudi in alto a destra
+    cx, cy, cr = W - 18 * k, 18 * k, 9 * k
+    if hover:
+        d.ellipse((cx - cr, cy - cr, cx + cr, cy + cr), fill=_mix(base, white, 0.6))
+    s = 3.5 * k
+    d.line([(cx - s, cy - s), (cx + s, cy + s)], fill=text_col, width=int(1.6 * k))
+    d.line([(cx - s, cy + s), (cx + s, cy - s)], fill=text_col, width=int(1.6 * k))
+    return card
+
+
+# ---------------------------------------------------------------------------
 #  Tema grafico moderno (ogni colore è una coppia: modalità chiara, scura)
 # ---------------------------------------------------------------------------
 FONT_FAMILY = "Segoe UI"
@@ -495,17 +724,19 @@ class TALdocApp(ctk.CTk):
         # Logo
         brand = ctk.CTkFrame(sb, fg_color="transparent")
         brand.pack(fill="x", padx=20, pady=(20, 18))
-        logo_set = False
-        if Image is not None and os.path.exists("logo.jpg"):
+        self._logo_pil = make_logo(176)
+        if self._logo_pil is not None:
+            self._logo_img = ctk.CTkImage(light_image=self._logo_pil, dark_image=self._logo_pil,
+                                          size=(46, 46))
+            ctk.CTkLabel(brand, image=self._logo_img, text="").pack(side="left")
             try:
-                logo_img = ctk.CTkImage(light_image=Image.open("logo.jpg"),
-                                        dark_image=Image.open("logo.jpg"), size=(40, 40))
-                ctk.CTkLabel(brand, image=logo_img, text="").pack(side="left")
-                logo_set = True
+                from PIL import ImageTk
+                self._icon_tk = ImageTk.PhotoImage(self._logo_pil.resize((64, 64), Image.LANCZOS))
+                self.iconphoto(True, self._icon_tk)
             except Exception:
                 pass
-        if not logo_set:
-            ctk.CTkLabel(brand, text="T", width=40, height=40, corner_radius=12,
+        else:
+            ctk.CTkLabel(brand, text="T", width=46, height=46, corner_radius=12,
                          fg_color=C["accent"], text_color="white",
                          font=F(20, "bold")).pack(side="left")
         names = ctk.CTkFrame(brand, fg_color="transparent")
@@ -644,23 +875,30 @@ class TALdocApp(ctk.CTk):
 
         # Barra domanda
         ask = ctk.CTkFrame(chat, fg_color=C["surface2"], corner_radius=14)
+        self.ask_bar = ask
         ask.grid(row=3, column=0, sticky="ew", padx=16, pady=(8, 16))
         ask.grid_columnconfigure(0, weight=1)
         self.question_entry = ctk.CTkEntry(
-            ask, placeholder_text="Fai una domanda sui documenti… es. Qual è il totale? Controlla i calcoli IVA",
+            ask, placeholder_text="Fai una domanda… scrivi @ per citare un documento o scegliere un'azione rapida",
             fg_color="transparent", border_width=0, height=46, font=F(14),
             text_color=C["text"], placeholder_text_color=C["muted"])
         self.question_entry.grid(row=0, column=0, sticky="ew", padx=(14, 6), pady=4)
-        self.question_entry.bind("<Return>", lambda e: self.ask_question())
+        ctk.CTkButton(ask, text="@", width=38, height=38, corner_radius=10, font=F(16, "bold"),
+                      fg_color=C["accent_bg"], hover_color=C["border"], text_color=C["accent"],
+                      command=self._open_at_button).grid(row=0, column=1, padx=(0, 2), pady=4)
         self.ask_btn = ctk.CTkButton(ask, text="Chiedi  ➤", command=self.ask_question,
                                      width=110, height=38, corner_radius=10, font=F(13, "bold"),
                                      fg_color=C["accent"], hover_color=C["accent_h"],
                                      text_color="white")
-        self.ask_btn.grid(row=0, column=1, padx=6, pady=4)
+        self.ask_btn.grid(row=0, column=2, padx=6, pady=4)
 
         # Suggerimenti rapidi
         chips = ctk.CTkFrame(chat, fg_color="transparent")
         chips.grid(row=4, column=0, sticky="w", padx=16, pady=(0, 14))
+        self.suggest_row = chips
+        self.tag_row = ctk.CTkFrame(chat, fg_color="transparent")
+        self.tag_row.grid(row=4, column=0, sticky="w", padx=16, pady=(0, 14))
+        self.tag_row.grid_remove()
         for s in ["Qual è il totale?", "Riassumi i punti chiave", "Chi è il fornitore?",
                   "Controlla quantità × prezzo"]:
             ctk.CTkButton(chips, text=s, height=28, corner_radius=14, font=F(12),
@@ -672,6 +910,8 @@ class TALdocApp(ctk.CTk):
         self.status = ctk.CTkLabel(main, text="Pronto. Carica i documenti e inizia a fare domande.",
                                    anchor="w", font=F(12), text_color=C["muted"])
         self.status.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+
+        self._init_mention()
 
     # ----------------------------------------------------------- helpers UI
     def _mode_index(self):
@@ -1070,6 +1310,299 @@ class TALdocApp(ctk.CTk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    # ------------------------------------------------------ menu "@" (tag)
+    QUICK_ACTIONS = [
+        {"key": "cmp_excel", "icon": "⇄", "label": "Confronta due Excel",
+         "desc": "Righe aggiunte, rimosse, valori e totali diversi", "types": ["excel"], "n": 2,
+         "template": "Confronta {0} e {1}: elenca le righe aggiunte, rimosse o con valori diversi "
+                     "e le differenze nei totali, indicando foglio e riga."},
+        {"key": "cmp_any", "icon": "≠", "label": "Confronta due documenti",
+         "desc": "Differenze di testo, importi, date e condizioni", "types": None, "n": 2,
+         "template": "Confronta {0} con {1} e segnala tutte le differenze importanti di testo, "
+                     "importi, date e condizioni."},
+        {"key": "check", "icon": "✓", "label": "Verifica i conti di un documento",
+         "desc": "Quantità × prezzo, imponibile + IVA, totali", "types": None, "n": 1,
+         "template": "Verifica i conti di {0}: quantità × prezzo, imponibile + IVA, somma righe = "
+                     "totale. Indica cosa non torna e la differenza esatta."},
+        {"key": "summary", "icon": "≡", "label": "Riassumi ed estrai i dati chiave",
+         "desc": "5 punti + date, importi, scadenze, controparti", "types": None, "n": 1,
+         "template": "Riassumi {0} in 5 punti ed estrai date, importi, scadenze e controparti."},
+    ]
+
+    def _init_mention(self):
+        self._menu = None
+        self._menu_items = []      # (kind, payload, row)
+        self._menu_index = 0
+        self._menu_at = None       # posizione della @ nel testo
+        self._act = None           # azione rapida in corso
+        e = self.question_entry
+        e.bind("<KeyRelease>", self._on_key_release)
+        e.bind("<Return>", self._on_return)
+        e.bind("<Up>", lambda ev: self._menu_move(-1))
+        e.bind("<Down>", lambda ev: self._menu_move(1))
+        e.bind("<Tab>", self._on_tab)
+        e.bind("<Escape>", lambda ev: self._close_menu(cancel=True))
+        e.bind("<FocusOut>", lambda ev: self.after(250, self._close_if_unfocused))
+        self.bind("<Configure>", lambda ev: self._close_menu() if ev.widget is self else None, add="+")
+
+    def _docs_of(self, types):
+        return [d for d in self.documents if types is None or d.type in types]
+
+    def _close_if_unfocused(self):
+        try:
+            f = self.focus_get()
+        except Exception:
+            f = None
+        if f is None or not str(f).startswith(str(self.question_entry)):
+            self._close_menu()
+
+    def _mention_token(self):
+        """Restituisce (posizione @, testo cercato) se il cursore è dentro un tag, altrimenti None."""
+        e = self.question_entry
+        text = e.get()
+        cur = e.index("insert")
+        before = text[:cur]
+        at = before.rfind("@")
+        if at < 0:
+            return None
+        if at > 0 and before[at - 1] not in " (:,;\n":
+            return None
+        token = before[at + 1:]
+        if len(token) > 60:
+            return None
+        # tag già completato (nome documento esatto seguito da altro testo)
+        for d in self.documents:
+            if token.startswith(d.name) and len(token) > len(d.name):
+                return None
+        return at, token
+
+    def _on_key_release(self, ev):
+        if ev.keysym in ("Up", "Down", "Return", "Escape", "Tab", "Shift_L", "Shift_R"):
+            return
+        self._update_tag_chips()
+        tok = self._mention_token()
+        if tok is None:
+            self._close_menu()
+            return
+        self._menu_at, query = tok
+        self._open_menu(query)
+
+    def _on_return(self, ev):
+        if self._menu is not None and self._menu_items:
+            self._menu_select(self._menu_index)
+            return "break"
+        self.ask_question()
+        return "break"
+
+    def _on_tab(self, ev):
+        if self._menu is not None and self._menu_items:
+            self._menu_select(self._menu_index)
+            return "break"
+
+    def _open_at_button(self):
+        e = self.question_entry
+        e.focus_set()
+        text = e.get()
+        if text and not text.endswith(" "):
+            e.insert("end", " ")
+        e.insert("end", "@")
+        e.icursor("end")
+        self._menu_at = len(e.get()) - 1
+        self._open_menu("")
+
+    def _open_menu(self, query: str):
+        q = query.lower().strip()
+        act = self._act
+        types = act["action"]["types"] if act else None
+        docs = [d for d in self._docs_of(types)
+                if (not q or q in d.name.lower()) and (not act or d not in act["picked"])]
+        actions = [] if act else [a for a in self.QUICK_ACTIONS if not q or q in a["label"].lower()]
+        if q and not docs and not actions:
+            self._close_menu()
+            return
+
+        if self._menu is None:
+            self._menu = ctk.CTkFrame(self, corner_radius=14, fg_color=C["surface"],
+                                      border_width=1, border_color=C["accent"])
+        m = self._menu
+        for w in m.winfo_children():
+            w.destroy()
+        self._menu_items = []
+        self.update_idletasks()
+        bar_w = max(int(self.ask_bar.winfo_width() / ctk.ScalingTracker.get_widget_scaling(self)), 480)
+        ctk.CTkFrame(m, fg_color="transparent", width=bar_w - 16, height=2).pack(padx=8, pady=(4, 0))
+
+        def header(text):
+            ctk.CTkLabel(m, text=text, font=F(11, "bold"), text_color=C["muted"],
+                         anchor="w").pack(fill="x", padx=16, pady=(10, 2))
+
+        if act:
+            a = act["action"]
+            nth = len(act["picked"]) + 1
+            kind = "file Excel" if a["types"] == ["excel"] else "documento"
+            header(f"{a['label'].upper()} · SCEGLI IL {nth}° {kind.upper()}  (Esc per annullare)")
+        else:
+            header("DOCUMENTI CARICATI")
+
+        if not self.documents:
+            ctk.CTkLabel(m, text="Nessun documento caricato: usa “Carica documenti” nella barra laterale.",
+                         font=F(12), text_color=C["muted"], anchor="w").pack(fill="x", padx=16, pady=6)
+        elif not docs:
+            ctk.CTkLabel(m, text="Nessun documento corrispondente.", font=F(12),
+                         text_color=C["muted"], anchor="w").pack(fill="x", padx=16, pady=6)
+        for d in docs[:7]:
+            row = ctk.CTkFrame(m, fg_color="transparent", corner_radius=10, height=46)
+            row.pack(fill="x", padx=8, pady=1)
+            ext = (d.ext.lstrip(".") or "FILE").upper()
+            ctk.CTkLabel(row, text=ext, width=52, height=30, corner_radius=8,
+                         fg_color=d.border_color, text_color="white",
+                         font=F(11, "bold")).pack(side="left", padx=(8, 10), pady=7)
+            ctk.CTkLabel(row, text=doc_title(d), font=F(13, "bold"),
+                         text_color=C["text"], anchor="w").pack(side="left")
+            ctk.CTkLabel(row, text=d.name, font=F(11), text_color=C["muted"],
+                         anchor="e").pack(side="right", padx=12)
+            self._menu_items.append(("doc", d, row))
+
+        if actions:
+            header("AZIONI RAPIDE")
+            for a in actions:
+                available = len(self._docs_of(a["types"])) >= a["n"]
+                row = ctk.CTkFrame(m, fg_color="transparent", corner_radius=10, height=46)
+                row.pack(fill="x", padx=8, pady=1)
+                ctk.CTkLabel(row, text=a["icon"], width=52, height=30, corner_radius=8,
+                             fg_color=C["accent_bg"], text_color=C["accent"],
+                             font=F(15, "bold")).pack(side="left", padx=(8, 10), pady=7)
+                ctk.CTkLabel(row, text=a["label"], font=F(13, "bold"),
+                             text_color=C["text"] if available else C["muted"],
+                             anchor="w").pack(side="left")
+                if available:
+                    note = a["desc"]
+                else:
+                    need = "file Excel" if a["types"] == ["excel"] else "documenti"
+                    note = f"Servono {a['n']} {need}" if a["n"] > 1 else "Carica un documento"
+                ctk.CTkLabel(row, text=note, font=F(11), text_color=C["muted"],
+                             anchor="e").pack(side="right", padx=12)
+                if available:
+                    self._menu_items.append(("action", a, row))
+        ctk.CTkFrame(m, fg_color="transparent", width=bar_w - 16, height=4).pack(padx=8, pady=(0, 4))
+
+        for i, (_, _, row) in enumerate(self._menu_items):
+            for w in [row] + row.winfo_children():
+                w.bind("<Button-1>", lambda ev, i=i: self._menu_select(i))
+                w.bind("<Enter>", lambda ev, i=i: self._menu_highlight(i))
+                try:
+                    w.configure(cursor="hand2")
+                except Exception:
+                    pass
+        self._menu_index = 0
+        self._menu_highlight(0)
+
+        bar = self.ask_bar
+        self.update_idletasks()
+        x = bar.winfo_rootx() - self.winfo_rootx()
+        y = bar.winfo_rooty() - self.winfo_rooty() - 8
+        sc = ctk.ScalingTracker.get_widget_scaling(self)
+        m.place(x=x / sc, y=y / sc, anchor="sw")
+        m.lift()
+
+    def _menu_highlight(self, i):
+        if not self._menu_items:
+            return
+        self._menu_index = max(0, min(i, len(self._menu_items) - 1))
+        for j, (_, _, row) in enumerate(self._menu_items):
+            row.configure(fg_color=C["accent_bg"] if j == self._menu_index else "transparent")
+
+    def _menu_move(self, step):
+        if self._menu is None or not self._menu_items:
+            return
+        self._menu_highlight((self._menu_index + step) % len(self._menu_items))
+        return "break"
+
+    def _close_menu(self, cancel=False):
+        if self._menu is not None:
+            self._menu.place_forget()
+        self._menu_items = []
+        if cancel and self._act:
+            # annulla l'azione rapida e ripristina il testo
+            e = self.question_entry
+            e.delete(self._act["start"], "end")
+            self._act = None
+            self._update_tag_chips()
+        return "break" if cancel else None
+
+    def _replace_token(self, new_text):
+        """Sostituisce '@testo-cercato' (dalla @ al cursore) con new_text."""
+        e = self.question_entry
+        cur = e.index("insert")
+        start = self._menu_at if self._menu_at is not None else cur
+        e.delete(start, cur)
+        e.insert(start, new_text)
+        e.icursor(start + len(new_text))
+        return start
+
+    def _menu_select(self, i):
+        if not self._menu_items:
+            return
+        kind, payload, _ = self._menu_items[i]
+        e = self.question_entry
+        e.focus_set()
+        if kind == "action":
+            start = self._replace_token("")
+            self._act = {"action": payload, "start": start, "picked": []}
+            lead = f"{payload['label']}: @"
+            e.insert(start, lead)
+            e.icursor(start + len(lead))
+            self._menu_at = start + len(lead) - 1
+            self._open_menu("")
+            return
+
+        doc = payload
+        if self._act:
+            act = self._act
+            act["picked"].append(doc)
+            a = act["action"]
+            tags = [f"@{d.name}" for d in act["picked"]]
+            e.delete(act["start"], "end")
+            if len(act["picked"]) < a["n"]:
+                txt = f"{a['label']}: " + " e ".join(tags) + " e @"
+                e.insert(act["start"], txt)
+                e.icursor("end")
+                self._menu_at = len(e.get()) - 1
+                self._open_menu("")
+                return
+            e.insert(act["start"], a["template"].format(*tags))
+            e.icursor("end")
+            self._act = None
+        else:
+            self._replace_token(f"@{doc.name} ")
+        self._close_menu()
+        self._update_tag_chips()
+
+    def _tagged_docs(self, text: str) -> List[Document]:
+        found = []
+        for d in sorted(self.documents, key=lambda d: len(d.name), reverse=True):
+            if f"@{d.name}" in text and d not in found:
+                found.append(d)
+        found.sort(key=lambda d: text.find(f"@{d.name}"))
+        return found
+
+    def _update_tag_chips(self):
+        tagged = self._tagged_docs(self.question_entry.get())
+        if tagged:
+            self.suggest_row.grid_remove()
+            for w in self.tag_row.winfo_children():
+                w.destroy()
+            ctk.CTkLabel(self.tag_row, text="Documenti citati:", font=F(12),
+                         text_color=C["muted"]).pack(side="left", padx=(2, 8))
+            for d in tagged:
+                ctk.CTkLabel(self.tag_row, text=f" {(d.ext.lstrip('.') or 'FILE').upper()} · {doc_title(d)} ",
+                             height=26, corner_radius=13, fg_color=d.border_color,
+                             text_color="white", font=F(12, "bold")).pack(side="left", padx=(0, 6))
+            self.tag_row.grid()
+        else:
+            self.tag_row.grid_remove()
+            self.suggest_row.grid()
+
     # ------------------------------------------------------------ documenti
     def load_documents(self):
         files = filedialog.askopenfilenames(
@@ -1095,27 +1628,34 @@ class TALdocApp(ctk.CTk):
             self.empty_docs.destroy()
             self.empty_docs = None
 
-        card = ctk.CTkFrame(self.docs_frame, width=170, height=134, corner_radius=14,
-                            fg_color=C["surface2"], border_width=2, border_color=doc.border_color)
+        img_n, img_h = make_card(doc), make_card(doc, hover=True)
+        if img_n is None:  # Pillow non disponibile: card semplice
+            card = ctk.CTkLabel(self.docs_frame, width=CARD_W, height=CARD_H, corner_radius=14,
+                                text=f"{doc.ext.upper()}\n{doc_title(doc)}", fg_color=C["surface2"])
+            card.pack(side="left", padx=6, pady=4)
+            card.bind("<Button-3>", lambda e: self._remove_doc(doc, card))
+            return
+        ci_n = ctk.CTkImage(light_image=img_n, dark_image=img_n, size=(CARD_W, CARD_H))
+        ci_h = ctk.CTkImage(light_image=img_h, dark_image=img_h, size=(CARD_W, CARD_H))
+        card = ctk.CTkLabel(self.docs_frame, image=ci_n, text="", cursor="hand2")
+        card._imgs = (ci_n, ci_h)
         card.pack(side="left", padx=6, pady=4)
-        card.pack_propagate(False)
 
-        top = ctk.CTkFrame(card, fg_color="transparent")
-        top.pack(fill="x", padx=12, pady=(12, 6))
-        ctk.CTkLabel(top, text=TYPE_ICONS.get(doc.type, "DOC"), width=44, height=44,
-                     corner_radius=10, fg_color=doc.border_color, text_color="white",
-                     font=F(13 if len(TYPE_ICONS.get(doc.type, "")) <= 1 else 11, "bold")
-                     ).pack(side="left")
-        ctk.CTkButton(top, text="✕", width=26, height=26, corner_radius=13, font=F(11),
-                      fg_color="transparent", hover_color=C["border"], text_color=C["muted"],
-                      command=lambda: self._remove_doc(doc, card)).pack(side="right", anchor="n")
+        def on_click(e):
+            # coordinate logiche (la card può essere ridimensionata dallo scaling di Windows)
+            sx = CARD_W / max(card.winfo_width(), 1)
+            sy = CARD_H / max(card.winfo_height(), 1)
+            if e.x * sx > CARD_W - 32 and e.y * sy < 32:
+                self._remove_doc(doc, card)
+            else:  # clic sulla card: cita il documento nella domanda
+                self._open_at_button()
+                self._replace_token(f"@{doc.name} ")
+                self._close_menu()
+                self._update_tag_chips()
 
-        name = doc.name if len(doc.name) <= 20 else doc.name[:18] + "…"
-        ctk.CTkLabel(card, text=name, font=F(12, "bold"), text_color=C["text"],
-                     anchor="w").pack(fill="x", padx=12)
-        words = len(doc.text.split()) if doc.text else 0
-        ctk.CTkLabel(card, text=f"{doc.type.upper()} · {words:,} parole".replace(",", "."),
-                     font=F(11), text_color=C["muted"], anchor="w").pack(fill="x", padx=12)
+        card.bind("<Enter>", lambda e: card.configure(image=ci_h))
+        card.bind("<Leave>", lambda e: card.configure(image=ci_n))
+        card.bind("<Button-1>", on_click)
 
     def _remove_doc(self, doc, card):
         if doc in self.documents:
@@ -1148,8 +1688,18 @@ class TALdocApp(ctk.CTk):
         q = self.question_entry.get().strip()
         if not q or self.busy:
             return
+        self._close_menu()
         self.question_entry.delete(0, "end")
-        self._run_ai(f"Tu: {q}", q, self._get_context())
+        self._update_tag_chips()
+        tagged = self._tagged_docs(q)
+        if tagged:
+            names = ", ".join(d.name for d in tagged)
+            context = "\n\n".join(f"=== {d.name} ===\n{d.text[:12000]}" for d in tagged)
+            prompt = (f"{q}\n\n(I documenti citati con @ sono: {names}. "
+                      "Usa solo questi documenti per rispondere.)")
+            self._run_ai(f"Tu: {q}", prompt, context)
+        else:
+            self._run_ai(f"Tu: {q}", q, self._get_context())
 
     def verify_accounts(self):
         if not self.documents:
@@ -1343,7 +1893,7 @@ class TALdocApp(ctk.CTk):
     def show_about(self):
         messagebox.showinfo("Informazioni",
             f"{APP_NAME}\n\nApp locale per interrogare documenti con AI.\n"
-            "Tutto avviene sul tuo PC.\n\nVersione 1.2.")
+            "Tutto avviene sul tuo PC.\n\nVersione 1.3.")
 
 
 if __name__ == "__main__":
