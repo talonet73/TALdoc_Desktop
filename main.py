@@ -14,6 +14,8 @@ from datetime import datetime
 from typing import List, Optional
 
 import threading
+import queue
+import traceback
 
 import customtkinter as ctk
 from tkinter import filedialog, messagebox, Menu
@@ -62,7 +64,7 @@ except ImportError:
     PADDLE_AVAILABLE = False
 
 APP_NAME = "TALdoc Desktop"
-OLLAMA_URL = "http://localhost:11434"
+OLLAMA_URL = "http://127.0.0.1:11434"  # 127.0.0.1 evita il ritardo IPv6 di "localhost" su Windows
 DEFAULT_MODEL = "qwen2.5:3b"  # leggero, buon rapporto
 
 BORDER_COLORS = {
@@ -185,6 +187,8 @@ class LocalAI:
             return False
 
     def ask(self, prompt: str, context: str = "") -> str:
+        if not self.available:
+            self.available = self.check()
         if not self.available:
             return "Ollama non disponibile. Avvia Ollama e assicurati che il modello sia scaricato."
         full = f"Contesto dai documenti:\n{context}\n\nDomanda: {prompt}\nRispondi in italiano, in modo chiaro e preciso. Se fai calcoli mostra i passaggi."
@@ -694,9 +698,40 @@ class TALdocApp(ctk.CTk):
         self.ai = LocalAI()
         self.busy = False
 
+        self._ui_queue = queue.Queue()
+        self._ollama_checking = False
         self._build_menu()
         self._build_ui()
-        self.after(300, self._start_up)
+        self.after(50, self._process_ui_queue)
+        self.after(600, self._start_up)
+
+    # ----------------------------------------------------- thread & errori
+    def _post(self, fn):
+        """Da usare nei thread secondari: esegue fn nel thread dell'interfaccia."""
+        self._ui_queue.put(fn)
+
+    def _process_ui_queue(self):
+        try:
+            while True:
+                fn = self._ui_queue.get_nowait()
+                try:
+                    fn()
+                except Exception:
+                    self.report_callback_exception(*sys.exc_info())
+        except queue.Empty:
+            pass
+        self.after(50, self._process_ui_queue)
+
+    def report_callback_exception(self, exc, val, tb):
+        """Errori imprevisti: li scrive in un log invece di bloccare l'app."""
+        try:
+            log = _settings_path().with_name("errori.log")
+            with open(log, "a", encoding="utf-8") as f:
+                f.write(f"\n--- {datetime.now():%Y-%m-%d %H:%M:%S} ---\n")
+                f.write("".join(traceback.format_exception(exc, val, tb)))
+            self.status.configure(text=f"Si è verificato un errore (dettagli in {log}).")
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ UI
     def _build_menu(self):
@@ -991,7 +1026,7 @@ class TALdocApp(ctk.CTk):
 
         def worker():
             answer = self.ai.ask(prompt, context)
-            self.after(0, lambda: self._show_answer(answer, done_msg))
+            self._post(lambda: self._show_answer(answer, done_msg))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1043,23 +1078,59 @@ class TALdocApp(ctk.CTk):
                 self.ram_label.configure(text="RAM: psutil non installato")
         except Exception:
             self.ram_label.configure(text="RAM: n/d")
-        # aggiorna anche lo stato di Ollama
-        self.ai.available = self.ai.check()
-        self.ollama_dot.configure(text_color=C["ok"] if self.ai.available else C["danger"])
-        self.ollama_label.configure(text="Ollama attivo" if self.ai.available else "Ollama non attivo")
+        # stato di Ollama controllato in background (non blocca mai la finestra)
+        if not self._ollama_checking:
+            self._ollama_checking = True
+
+            def check():
+                ok = self.ai.check()
+                self._post(lambda: self._set_ollama_status(ok))
+
+            threading.Thread(target=check, daemon=True).start()
         self.after(5000, self.update_ram_indicator)
+
+    def _set_ollama_status(self, ok: bool):
+        self._ollama_checking = False
+        self.ai.available = ok
+        self.ollama_dot.configure(text_color=C["ok"] if ok else C["danger"])
+        self.ollama_label.configure(text="Ollama attivo" if ok else "Ollama non attivo")
 
     # ------------------------------------------------------- dialog moderni
     def _modal(self, title, w=480, h=360):
+        """Finestra di dialogo centrata sulla principale e sempre visibile sopra di essa.
+        Non usa grab_set: su Windows un dialogo finito dietro la finestra principale
+        bloccava tutti i clic dell'app."""
         win = ctk.CTkToplevel(self)
         win.title(title)
-        win.geometry(f"{w}x{h}")
+        self.update_idletasks()
+        try:
+            sc = ctk.ScalingTracker.get_window_scaling(self)
+            px = self.winfo_rootx() + (self.winfo_width() - int(w * sc)) // 2
+            py = self.winfo_rooty() + max((self.winfo_height() - int(h * sc)) // 2, 0)
+            win.geometry(f"{w}x{h}+{max(px, 0)}+{max(py, 0)}")
+        except Exception:
+            win.geometry(f"{w}x{h}")
         win.configure(fg_color=C["bg"])
         win.transient(self)
         win.resizable(False, False)
-        win.after(100, win.grab_set)
-        win.after(100, win.lift)
+        self._bring_to_front(win)
         return win
+
+    def _bring_to_front(self, win):
+        def show():
+            try:
+                if not win.winfo_exists():
+                    return
+                win.deiconify()
+                win.lift()
+                win.attributes("-topmost", True)
+                win.focus_force()
+                win.after(300, lambda: win.winfo_exists() and win.attributes("-topmost", False))
+            except Exception:
+                pass
+        # CTkToplevel su Windows si ridisegna dopo ~200 ms: riporto davanti dopo
+        win.after(250, show)
+        win.after(700, show)
 
     def _start_up(self):
         if self.settings.get("configured") and self.settings.get("model"):
@@ -1073,7 +1144,11 @@ class TALdocApp(ctk.CTk):
 
     def open_setup_wizard(self, first_run: bool = False):
         """Configurazione: aspetto + analisi del PC + scelta del motore AI."""
+        if getattr(self, "_wizard", None) is not None and self._wizard.winfo_exists():
+            self._bring_to_front(self._wizard)
+            return
         win = self._modal("Configurazione TALdoc", 700, 760)
+        self._wizard = win
         win.resizable(True, True)
         win.minsize(640, 560)
 
@@ -1202,7 +1277,7 @@ class TALdocApp(ctk.CTk):
         def analyse():
             hw = detect_hardware()
             results = estimate_models(hw)
-            self.after(0, lambda: fill_results(hw, results) if win.winfo_exists() else None)
+            self._post(lambda: fill_results(hw, results) if win.winfo_exists() else None)
 
         threading.Thread(target=analyse, daemon=True).start()
 
@@ -1293,20 +1368,20 @@ class TALdocApp(ctk.CTk):
                             continue
                         data = json.loads(line)
                         if data.get("error"):
-                            self.after(0, lambda e=data["error"]: ui(f"Errore: {e}"))
+                            self._post(lambda e=data["error"]: ui(f"Errore: {e}"))
                             return
                         total, done = data.get("total"), data.get("completed")
                         if total and done:
                             txt = f"{done / 1e9:.2f} / {total / 1e9:.2f} GB"
-                            self.after(0, lambda t=txt, f=done / total: ui(t, f))
+                            self._post(lambda t=txt, f=done / total: ui(t, f))
                         elif data.get("status"):
-                            self.after(0, lambda s=data["status"]: ui(s))
+                            self._post(lambda s=data["status"]: ui(s))
                         if data.get("status") == "success":
                             break
-                self.after(0, lambda: (win.destroy() if win.winfo_exists() else None,
+                self._post(lambda: (win.destroy() if win.winfo_exists() else None,
                                        self.status.configure(text=f"Modello {model} pronto all'uso.")))
             except Exception as e:
-                self.after(0, lambda: ui(f"Download non riuscito: {e}"))
+                self._post(lambda: ui(f"Download non riuscito: {e}"))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1800,7 +1875,7 @@ class TALdocApp(ctk.CTk):
 
         def worker():
             nuovo = self.ai.ask(prompt)
-            self.after(0, lambda: self._edit_done(doc, nuovo))
+            self._post(lambda: self._edit_done(doc, nuovo))
 
         threading.Thread(target=worker, daemon=True).start()
 
