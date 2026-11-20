@@ -94,9 +94,13 @@ Tutto resta sul tuo PC. Nessun dato viene inviato online.
 
 2. PRIMO AVVIO
 - Assicurati di avere Ollama installato (scaricalo da ollama.com e avvialo).
-- All'avvio l'app ti chiede quanta RAM ha il PC e ti suggerisce un modello leggero.
-- Scarica il modello consigliato con il comando che ti indica (es. ollama pull qwen2.5:3b).
-- Poi puoi usare subito l'app.
+- Al primo avvio scegli l'aspetto: chiaro (testo nero) oppure scuro (testo chiaro).
+- L'app analizza processore, RAM ed eventuale scheda video NVIDIA e ti mostra i modelli AI
+  con la qualità e i secondi di attesa stimati per ogni risposta. Quello con il miglior
+  rapporto qualità/velocità è segnato come CONSIGLIATO, ma la scelta è tua.
+- Se il modello scelto non è ancora sul PC, l'app si offre di scaricarlo da sola
+  (oppure puoi usare il comando: ollama pull nome-modello).
+- Puoi rifare la scelta quando vuoi dal pulsante "Motore AI e aspetto" nella barra laterale.
 
 3. CARICARE DOCUMENTI
 Clicca "Carica documenti" nella barra laterale e seleziona uno o più file.
@@ -144,7 +148,6 @@ Per attivarlo: pip install paddleocr opencv-python-headless
 - Ricerca full-text tra tutti i documenti
 - Esportazione dei risultati in PDF o Excel
 - Supporto completo a PowerPoint e ODT
-- Modalità scura/chiara più personalizzabile
 - Integrazione diretta con cartelle di Windows (drag & drop)
 - Storico completo delle domande e risposte
 - Modelli AI più grandi se hai molta RAM
@@ -153,6 +156,10 @@ Per attivarlo: pip install paddleocr opencv-python-headless
 9. INDICATORE RAM
 Nella barra laterale vedi l'utilizzo attuale della RAM del PC (richiede psutil).
 Il colore diventa arancione sopra il 70% e rosso sopra l'85%.
+
+10. ASPETTO
+In basso a sinistra puoi passare in ogni momento tra vista Chiara (sfondo chiaro, testo nero)
+e Scura (sfondo scuro, testo chiaro). La scelta viene ricordata.
 
 Buon lavoro con TALdoc!
 """
@@ -177,7 +184,7 @@ class LocalAI:
             r = requests.post(
                 f"{OLLAMA_URL}/api/generate",
                 json={"model": self.model, "prompt": full, "stream": False},
-                timeout=120
+                timeout=300
             )
             if r.status_code == 200:
                 return r.json().get("response", "Nessuna risposta")
@@ -252,6 +259,160 @@ class Document:
             return f"[Errore lettura: {e}]"
 
 # ---------------------------------------------------------------------------
+#  Impostazioni salvate (tema, modello) – così la configurazione si fa una volta
+# ---------------------------------------------------------------------------
+def _settings_path() -> Path:
+    base = os.environ.get("APPDATA") or str(Path.home())
+    folder = Path(base) / "TALdoc_Desktop"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        folder = Path.home()
+    return folder / "settings.json"
+
+
+def load_settings() -> dict:
+    try:
+        with open(_settings_path(), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_settings(data: dict):
+    try:
+        with open(_settings_path(), "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+#  Analisi della potenza del PC e stima dei tempi di risposta
+# ---------------------------------------------------------------------------
+# Modelli Ollama (quantizzazione Q4 predefinita).
+# size_gb = spazio su disco / memoria occupata; min_ram = RAM totale minima consigliata
+MODEL_CATALOG = [
+    {"name": "qwen2.5:1.5b", "params": 1.5, "size_gb": 1.0, "min_ram": 4,  "quality": 2,
+     "desc": "Velocissimo, per PC datati. Risposte semplici."},
+    {"name": "qwen2.5:3b",   "params": 3.0, "size_gb": 1.9, "min_ram": 6,  "quality": 3,
+     "desc": "Leggero e veloce. Buono per domande dirette."},
+    {"name": "qwen2.5:7b",   "params": 7.6, "size_gb": 4.7, "min_ram": 12, "quality": 4,
+     "desc": "Ottimo equilibrio. Calcoli e confronti affidabili."},
+    {"name": "qwen2.5:14b",  "params": 14.8, "size_gb": 9.0, "min_ram": 20, "quality": 5,
+     "desc": "Molto preciso. Richiede un PC potente."},
+    {"name": "qwen2.5:32b",  "params": 32.8, "size_gb": 20.0, "min_ram": 40, "quality": 5,
+     "desc": "Massima qualità. Solo per workstation."},
+]
+
+# Domanda "tipo" usata per la stima: documento di 2-3 pagine e risposta di ~200 parole
+EST_PROMPT_TOKENS = 1500
+EST_ANSWER_TOKENS = 280
+MAX_GOOD_SECONDS = 45  # oltre questa attesa l'uso quotidiano diventa scomodo
+
+
+def _no_window_flags():
+    return 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW su Windows
+
+
+def detect_hardware() -> dict:
+    """Rileva processore, RAM e GPU NVIDIA (se presente)."""
+    import platform
+    import subprocess
+
+    hw = {"cpu_name": platform.processor() or "Processore sconosciuto",
+          "cores": os.cpu_count() or 4, "threads": os.cpu_count() or 4,
+          "ghz": 2.5, "ram_gb": 8.0, "gpu_name": None, "vram_gb": 0.0}
+
+    # Nome e frequenza CPU dal registro di Windows
+    if os.name == "nt":
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                 r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
+            hw["cpu_name"] = winreg.QueryValueEx(key, "ProcessorNameString")[0].strip()
+            hw["ghz"] = winreg.QueryValueEx(key, "~MHz")[0] / 1000
+            winreg.CloseKey(key)
+        except Exception:
+            pass
+    else:
+        try:
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if line.startswith("model name"):
+                        hw["cpu_name"] = line.split(":", 1)[1].strip()
+                        break
+        except Exception:
+            pass
+
+    if PSUTIL_AVAILABLE:
+        try:
+            hw["ram_gb"] = psutil.virtual_memory().total / (1024 ** 3)
+            hw["cores"] = psutil.cpu_count(logical=False) or hw["cores"]
+            hw["threads"] = psutil.cpu_count(logical=True) or hw["threads"]
+            freq = psutil.cpu_freq()
+            if freq and freq.max and freq.max > 500:
+                hw["ghz"] = max(hw["ghz"], freq.max / 1000)
+        except Exception:
+            pass
+
+    # GPU NVIDIA (Ollama la usa automaticamente)
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=4, creationflags=_no_window_flags())
+        if out.returncode == 0 and out.stdout.strip():
+            name, mem = out.stdout.strip().splitlines()[0].rsplit(",", 1)
+            hw["gpu_name"] = name.strip()
+            hw["vram_gb"] = float(mem) / 1024
+    except Exception:
+        pass
+    return hw
+
+
+def estimate_models(hw: dict) -> List[dict]:
+    """Per ogni modello stima velocità e secondi di attesa per una risposta tipo."""
+    # Punteggio CPU: core fisici × GHz (la velocità su CPU è limitata anche dalla memoria)
+    cpu_score = min(hw["cores"] * max(hw["ghz"], 1.0), 45)
+    if hw["threads"] > hw["cores"]:
+        cpu_score *= 1.1
+    results = []
+    for m in MODEL_CATALOG:
+        on_gpu = hw["vram_gb"] >= m["size_gb"] + 1.0
+        if on_gpu:
+            gen_tps = max(min(260 / m["params"], 120), 8)   # stima prudente GPU media
+            prefill_tps = gen_tps * 20
+        else:
+            gen_tps = max(cpu_score * 2.6 / m["params"], 0.3)
+            prefill_tps = gen_tps * 10
+        seconds = EST_PROMPT_TOKENS / prefill_tps + EST_ANSWER_TOKENS / gen_tps + 1.5
+        fits = hw["ram_gb"] >= m["min_ram"] or on_gpu
+        results.append({**m, "seconds": seconds, "fits": fits, "on_gpu": on_gpu,
+                        "tps": gen_tps, "recommended": False})
+
+    usable = [r for r in results if r["fits"]]
+    good = [r for r in usable if r["seconds"] <= MAX_GOOD_SECONDS]
+    if good:
+        # la qualità più alta entro un'attesa accettabile; a parità, il più veloce
+        best = max(good, key=lambda r: (r["quality"], -r["seconds"]))
+    elif usable:
+        best = min(usable, key=lambda r: r["seconds"])
+    else:
+        best = results[0]
+    best["recommended"] = True
+    return results
+
+
+def format_seconds(s: float) -> str:
+    if s < 10:
+        return f"~{max(round(s), 2)} s"
+    if s < 60:
+        return f"~{int(round(s / 5.0) * 5)} s"
+    m = s / 60
+    return f"~{m:.0f} min" if m >= 1.5 else "~1 min"
+
+
+# ---------------------------------------------------------------------------
 #  Tema grafico moderno (ogni colore è una coppia: modalità chiara, scura)
 # ---------------------------------------------------------------------------
 FONT_FAMILY = "Segoe UI"
@@ -262,7 +423,7 @@ C = {
     "surface":   ("#FFFFFF", "#161E31"),
     "surface2":  ("#EEF1F8", "#1E2840"),
     "border":    ("#E2E6F0", "#263250"),
-    "text":      ("#0F172A", "#E5E9F5"),
+    "text":      ("#000000", "#E5E9F5"),
     "muted":     ("#64748B", "#8C97B2"),
     "accent":    ("#6366F1", "#7C83FF"),
     "accent_h":  ("#4F46E5", "#6366F1"),
@@ -291,7 +452,8 @@ class SidebarButton(ctk.CTkButton):
 class TALdocApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        ctk.set_appearance_mode("dark")
+        self.settings = load_settings()
+        ctk.set_appearance_mode(self.settings.get("theme", "dark"))
         ctk.set_default_color_theme("blue")
 
         self.title(APP_NAME)
@@ -305,7 +467,7 @@ class TALdocApp(ctk.CTk):
 
         self._build_menu()
         self._build_ui()
-        self.after(300, self._ask_ram_on_start)
+        self.after(300, self._start_up)
 
     # ------------------------------------------------------------------ UI
     def _build_menu(self):
@@ -373,6 +535,8 @@ class TALdocApp(ctk.CTk):
 
         ctk.CTkLabel(sb, text="AIUTO", font=F(11, "bold"),
                      text_color=C["muted"]).pack(anchor="w", padx=24, pady=(12, 4))
+        SidebarButton(sb, "Motore AI e aspetto", "⚙",
+                      lambda: self.open_setup_wizard()).pack(fill="x", padx=12, pady=2)
         SidebarButton(sb, "Manuale", "?", self.show_manual).pack(fill="x", padx=12, pady=2)
         SidebarButton(sb, "Informazioni", "i", self.show_about).pack(fill="x", padx=12, pady=2)
 
@@ -404,14 +568,16 @@ class TALdocApp(ctk.CTk):
         self.ram_bar.set(0)
         self.ram_bar.pack(fill="x", padx=14, pady=(2, 14))
 
-        theme_row = ctk.CTkFrame(bottom, fg_color="transparent")
-        theme_row.pack(fill="x")
-        ctk.CTkLabel(theme_row, text="Tema scuro", font=F(12),
-                     text_color=C["muted"]).pack(side="left", padx=4)
-        self.theme_switch = ctk.CTkSwitch(theme_row, text="", command=self._toggle_theme,
-                                          progress_color=C["accent"], width=44)
-        self.theme_switch.select()
-        self.theme_switch.pack(side="right")
+        ctk.CTkLabel(bottom, text="Aspetto", font=F(11, "bold"),
+                     text_color=C["muted"]).pack(anchor="w", padx=4, pady=(0, 4))
+        self.theme_seg = ctk.CTkSegmentedButton(
+            bottom, values=["☀ Chiaro", "☾ Scuro"], height=32, corner_radius=10, font=F(12),
+            selected_color=C["accent"], selected_hover_color=C["accent_h"],
+            unselected_color=C["surface2"], unselected_hover_color=C["border"],
+            fg_color=C["surface2"], text_color=C["text"],
+            command=lambda v: self._apply_theme("light" if "Chiaro" in v else "dark"))
+        self.theme_seg.set("☀ Chiaro" if self.settings.get("theme", "dark") == "light" else "☾ Scuro")
+        self.theme_seg.pack(fill="x")
 
         self.after(1000, self.update_ram_indicator)
 
@@ -520,9 +686,15 @@ class TALdocApp(ctk.CTk):
         tb.tag_config("info", foreground=C["muted"][i])
         tb.tag_config("error", foreground=C["danger"][i])
 
-    def _toggle_theme(self):
-        ctk.set_appearance_mode("dark" if self.theme_switch.get() else "light")
+    def _apply_theme(self, mode: str, save: bool = True):
+        """mode = 'light' (sfondo chiaro, testo nero) oppure 'dark' (sfondo scuro, testo chiaro)."""
+        ctk.set_appearance_mode(mode)
         self._setup_text_tags()
+        if hasattr(self, "theme_seg"):
+            self.theme_seg.set("☀ Chiaro" if mode == "light" else "☾ Scuro")
+        if save:
+            self.settings["theme"] = mode
+            save_settings(self.settings)
 
     def _welcome_message(self):
         self._write("Benvenuto in TALdoc Desktop 👋\n\n", "answer")
@@ -649,54 +821,254 @@ class TALdocApp(ctk.CTk):
         win.after(100, win.lift)
         return win
 
-    def _ask_ram_on_start(self):
-        win = self._modal("Configurazione iniziale", 520, 400)
-        ctk.CTkLabel(win, text="Benvenuto 👋", font=F(22, "bold"),
-                     text_color=C["text"]).pack(anchor="w", padx=28, pady=(26, 4))
-        ctk.CTkLabel(win, text="Quanta RAM ha questo PC? Ti suggerisco il modello AI più adatto.",
-                     font=F(13), text_color=C["muted"], wraplength=460,
-                     justify="left").pack(anchor="w", padx=28)
-
-        options = [
-            ("8 GB o meno", 8, "qwen2.5:3b", "leggero e veloce"),
-            ("16 GB", 16, "qwen2.5:7b", "buon equilibrio"),
-            ("32 GB o più", 32, "qwen2.5:14b", "più preciso"),
-        ]
-        choice = ctk.IntVar(value=8)
-        box = ctk.CTkFrame(win, fg_color="transparent")
-        box.pack(fill="x", padx=28, pady=18)
-        for label, val, model, desc in options:
-            card = ctk.CTkFrame(box, fg_color=C["surface"], corner_radius=12,
-                                border_width=1, border_color=C["border"])
-            card.pack(fill="x", pady=4)
-            ctk.CTkRadioButton(card, text=f"{label}   ·   {model}  ({desc})", variable=choice,
-                               value=val, font=F(13), text_color=C["text"],
-                               fg_color=C["accent"], hover_color=C["accent_h"]
-                               ).pack(anchor="w", padx=14, pady=12)
-
-        def confirm():
-            ram = choice.get()
-            win.destroy()
-            self._apply_ram(ram)
-
-        ctk.CTkButton(win, text="Continua", height=42, corner_radius=12, font=F(14, "bold"),
-                      fg_color=C["accent"], hover_color=C["accent_h"], text_color="white",
-                      command=confirm).pack(fill="x", padx=28, pady=(0, 20))
-        win.protocol("WM_DELETE_WINDOW", confirm)
-
-    def _apply_ram(self, ram: int):
-        if ram <= 8:
-            model, desc = "qwen2.5:3b", "leggero e veloce"
-        elif ram <= 16:
-            model, desc = "qwen2.5:7b", "buon equilibrio"
+    def _start_up(self):
+        if self.settings.get("configured") and self.settings.get("model"):
+            self._set_model(self.settings["model"])
         else:
-            model, desc = "qwen2.5:14b", "più preciso"
+            self.open_setup_wizard(first_run=True)
+
+    def _set_model(self, model: str):
         self.ai.model = model
         self.model_label.configure(text=f"Modello: {model}")
-        messagebox.showinfo("Modello consigliato",
-            f"RAM {ram} GB → ti consiglio {model} ({desc}).\n\n"
-            f"Se non lo hai ancora, apri un terminale e lancia:\nollama pull {model}\n\n"
-            "Poi puoi usare subito l'app.")
+
+    def open_setup_wizard(self, first_run: bool = False):
+        """Configurazione: aspetto + analisi del PC + scelta del motore AI."""
+        win = self._modal("Configurazione TALdoc", 700, 760)
+        win.resizable(True, True)
+        win.minsize(640, 560)
+
+        footer = ctk.CTkFrame(win, fg_color="transparent")
+        footer.pack(side="bottom", fill="x", padx=28, pady=(6, 20))
+        body = ctk.CTkScrollableFrame(win, fg_color="transparent",
+                                      scrollbar_button_color=C["border"])
+        body.pack(fill="both", expand=True, padx=10, pady=(10, 0))
+
+        title = "Benvenuto in TALdoc 👋" if first_run else "Impostazioni"
+        ctk.CTkLabel(body, text=title, font=F(22, "bold"),
+                     text_color=C["text"]).pack(anchor="w", padx=18, pady=(12, 2))
+        ctk.CTkLabel(body, text="Scegli l'aspetto dell'app e il motore AI più adatto al tuo PC.",
+                     font=F(13), text_color=C["muted"]).pack(anchor="w", padx=18)
+
+        # ---- 1. Aspetto
+        ctk.CTkLabel(body, text="1 · ASPETTO", font=F(11, "bold"),
+                     text_color=C["muted"]).pack(anchor="w", padx=18, pady=(20, 6))
+        theme_var = ctk.StringVar(value=self.settings.get("theme", "dark"))
+        tiles = ctk.CTkFrame(body, fg_color="transparent")
+        tiles.pack(fill="x", padx=18)
+        tiles.grid_columnconfigure((0, 1), weight=1)
+
+        def theme_tile(col, value, label, sub, bg, fg, fg2):
+            t = ctk.CTkFrame(tiles, fg_color=C["surface"], corner_radius=12,
+                             border_width=1, border_color=C["border"])
+            t.grid(row=0, column=col, sticky="ew", padx=(0 if col == 0 else 6, 6 if col == 0 else 0))
+            prev = ctk.CTkFrame(t, fg_color=bg, corner_radius=8, height=72,
+                                border_width=1, border_color="#CBD5E1")
+            prev.pack(fill="x", padx=12, pady=(12, 8))
+            prev.pack_propagate(False)
+            ctk.CTkLabel(prev, text="Aa  Totale fattura", font=F(14, "bold"),
+                         text_color=fg).pack(anchor="w", padx=12, pady=(10, 0))
+            ctk.CTkLabel(prev, text="1.220,00 EUR · IVA 22%", font=F(11),
+                         text_color=fg2).pack(anchor="w", padx=12, pady=(0, 8))
+            ctk.CTkRadioButton(t, text=label, variable=theme_var, value=value, font=F(13, "bold"),
+                               text_color=C["text"], fg_color=C["accent"], hover_color=C["accent_h"],
+                               command=lambda: self._apply_theme(theme_var.get(), save=False)
+                               ).pack(anchor="w", padx=12)
+            ctk.CTkLabel(t, text=sub, font=F(11), text_color=C["muted"]).pack(anchor="w", padx=40, pady=(0, 12))
+
+        theme_tile(0, "light", "Chiara", "Sfondo chiaro, testo nero", "#FFFFFF", "#000000", "#475569")
+        theme_tile(1, "dark", "Scura", "Sfondo scuro, testo chiaro", "#0B1020", "#F1F5F9", "#94A3B8")
+
+        # ---- 2. Il tuo PC
+        ctk.CTkLabel(body, text="2 · IL TUO PC", font=F(11, "bold"),
+                     text_color=C["muted"]).pack(anchor="w", padx=18, pady=(20, 6))
+        pc_card = ctk.CTkFrame(body, fg_color=C["surface"], corner_radius=12,
+                               border_width=1, border_color=C["border"])
+        pc_card.pack(fill="x", padx=18)
+        pc_label = ctk.CTkLabel(pc_card, text="Analisi del processore e della RAM in corso…",
+                                font=F(13), text_color=C["text"], justify="left", anchor="w")
+        pc_label.pack(fill="x", padx=14, pady=12)
+
+        # ---- 3. Motore AI
+        ctk.CTkLabel(body, text="3 · MOTORE AI", font=F(11, "bold"),
+                     text_color=C["muted"]).pack(anchor="w", padx=18, pady=(20, 6))
+        models_box = ctk.CTkFrame(body, fg_color="transparent")
+        models_box.pack(fill="x", padx=18)
+        ctk.CTkLabel(body, text=(f"Tempi stimati per una risposta di circa 200 parole su un documento di 2–3 pagine. "
+                                 "Sono valori approssimativi: documenti lunghi richiedono più tempo e la prima "
+                                 "domanda dopo l'avvio può impiegare qualche secondo in più per caricare il modello."),
+                     font=F(11), text_color=C["muted"], wraplength=600, justify="left"
+                     ).pack(anchor="w", padx=18, pady=(8, 10))
+
+        model_var = ctk.StringVar(value="")
+        confirm_btn = ctk.CTkButton(footer, text="Conferma e inizia" if first_run else "Salva",
+                                    height=44, corner_radius=12, font=F(14, "bold"),
+                                    fg_color=C["accent"], hover_color=C["accent_h"],
+                                    text_color="white", state="disabled")
+        confirm_btn.pack(fill="x")
+
+        def fill_results(hw, results):
+            gpu = (f"{hw['gpu_name']} ({hw['vram_gb']:.0f} GB)" if hw["gpu_name"]
+                   else "nessuna GPU NVIDIA (l'AI userà il processore)")
+            pc_label.configure(text=(f"Processore: {hw['cpu_name']}\n"
+                                     f"{hw['cores']} core / {hw['threads']} thread · {hw['ghz']:.1f} GHz\n"
+                                     f"RAM: {hw['ram_gb']:.0f} GB   ·   GPU: {gpu}"))
+            current = self.settings.get("model")
+            for r in results:
+                row = ctk.CTkFrame(models_box, corner_radius=12, border_width=2 if r["recommended"] else 1,
+                                   fg_color=C["accent_bg"] if r["recommended"] else C["surface"],
+                                   border_color=C["accent"] if r["recommended"] else C["border"])
+                row.pack(fill="x", pady=4)
+                row.grid_columnconfigure(1, weight=1)
+                rb = ctk.CTkRadioButton(row, text="", variable=model_var, value=r["name"], width=24,
+                                        fg_color=C["accent"], hover_color=C["accent_h"],
+                                        state="normal" if r["fits"] else "disabled")
+                rb.grid(row=0, column=0, rowspan=2, padx=(14, 4), pady=12)
+
+                head = ctk.CTkFrame(row, fg_color="transparent")
+                head.grid(row=0, column=1, sticky="w", pady=(10, 0))
+                ctk.CTkLabel(head, text=r["name"], font=F(14, "bold"),
+                             text_color=C["text"] if r["fits"] else C["muted"]).pack(side="left")
+                ctk.CTkLabel(head, text="  " + "★" * r["quality"] + "☆" * (5 - r["quality"]),
+                             font=F(12), text_color=C["warn"] if r["fits"] else C["muted"]).pack(side="left")
+                if r["recommended"]:
+                    ctk.CTkLabel(head, text=" CONSIGLIATO ", font=F(10, "bold"), corner_radius=8,
+                                 fg_color=C["accent"], text_color="white").pack(side="left", padx=8)
+                sub = f"{r['desc']}  ·  {r['size_gb']:.1f} GB"
+                if not r["fits"]:
+                    sub = f"RAM insufficiente (servono almeno {r['min_ram']} GB)  ·  {r['size_gb']:.1f} GB"
+                elif r["on_gpu"]:
+                    sub += "  ·  accelerato da GPU"
+                ctk.CTkLabel(row, text=sub, font=F(11), text_color=C["muted"], anchor="w"
+                             ).grid(row=1, column=1, sticky="w", pady=(0, 10))
+
+                if r["fits"]:
+                    secs = r["seconds"]
+                    col = C["ok"] if secs <= 20 else C["warn"] if secs <= 60 else C["danger"]
+                    tbox = ctk.CTkFrame(row, fg_color="transparent")
+                    tbox.grid(row=0, column=2, rowspan=2, padx=16)
+                    ctk.CTkLabel(tbox, text=format_seconds(secs), font=F(16, "bold"),
+                                 text_color=col).pack(anchor="e")
+                    ctk.CTkLabel(tbox, text="attesa stimata", font=F(10),
+                                 text_color=C["muted"]).pack(anchor="e")
+                for w in (row, head):
+                    if r["fits"]:
+                        w.bind("<Button-1>", lambda e, n=r["name"]: model_var.set(n))
+
+            rec = next(r for r in results if r["recommended"])
+            fit_names = [r["name"] for r in results if r["fits"]]
+            model_var.set(current if (current in fit_names and not first_run) else rec["name"])
+            confirm_btn.configure(state="normal")
+
+        def analyse():
+            hw = detect_hardware()
+            results = estimate_models(hw)
+            self.after(0, lambda: fill_results(hw, results) if win.winfo_exists() else None)
+
+        threading.Thread(target=analyse, daemon=True).start()
+
+        def confirm():
+            model = model_var.get()
+            if not model:
+                return
+            theme = theme_var.get()
+            win.destroy()
+            self.settings.update({"configured": True, "model": model, "theme": theme})
+            save_settings(self.settings)
+            self._apply_theme(theme)
+            self._set_model(model)
+            self.status.configure(text=f"Motore AI impostato: {model}")
+            self._check_model_installed(model)
+
+        def on_close():
+            if first_run:
+                # se l'utente chiude, si usa la scelta corrente
+                if model_var.get():
+                    confirm()
+                else:
+                    self._apply_theme(theme_var.get())
+                    win.destroy()
+            else:
+                self._apply_theme(self.settings.get("theme", "dark"), save=False)
+                win.destroy()
+
+        confirm_btn.configure(command=confirm)
+        win.protocol("WM_DELETE_WINDOW", on_close)
+
+    # --------------------------------------------- download modello Ollama
+    def _installed_models(self) -> Optional[List[str]]:
+        try:
+            r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=3)
+            if r.status_code == 200:
+                return [m.get("name", "") for m in r.json().get("models", [])]
+        except Exception:
+            pass
+        return None
+
+    def _check_model_installed(self, model: str):
+        installed = self._installed_models()
+        if installed is None:
+            messagebox.showinfo("Ollama non attivo",
+                f"Hai scelto {model}.\n\nOllama non risulta avviato: avvialo e poi scarica il modello "
+                f"aprendo un terminale e lanciando:\n\nollama pull {model}")
+            return
+        if any(n == model or n.startswith(model + "-") for n in installed):
+            return
+        size = next((m["size_gb"] for m in MODEL_CATALOG if m["name"] == model), None)
+        size_txt = f" (circa {size:.1f} GB)" if size else ""
+        if messagebox.askyesno("Scarica modello",
+                               f"Il modello {model} non è ancora presente sul PC{size_txt}.\n\n"
+                               "Vuoi scaricarlo adesso? Serve una connessione internet solo per il download."):
+            self._download_model(model)
+
+    def _download_model(self, model: str):
+        win = self._modal("Download modello", 480, 210)
+        ctk.CTkLabel(win, text=f"Scarico {model}", font=F(18, "bold"),
+                     text_color=C["text"]).pack(anchor="w", padx=24, pady=(22, 4))
+        info = ctk.CTkLabel(win, text="Connessione a Ollama…", font=F(12), text_color=C["muted"])
+        info.pack(anchor="w", padx=24)
+        bar = ctk.CTkProgressBar(win, height=10, corner_radius=5,
+                                 progress_color=C["accent"], fg_color=C["surface2"])
+        bar.set(0)
+        bar.pack(fill="x", padx=24, pady=16)
+        state = {"stop": False}
+        ctk.CTkButton(win, text="Annulla", height=34, corner_radius=10, font=F(12),
+                      fg_color=C["surface2"], hover_color=C["border"], text_color=C["text"],
+                      command=lambda: (state.update(stop=True), win.destroy())
+                      ).pack(anchor="e", padx=24)
+
+        def ui(text, frac=None):
+            if win.winfo_exists():
+                info.configure(text=text)
+                if frac is not None:
+                    bar.set(frac)
+
+        def worker():
+            try:
+                with requests.post(f"{OLLAMA_URL}/api/pull", json={"name": model, "stream": True},
+                                   stream=True, timeout=30) as r:
+                    for line in r.iter_lines():
+                        if state["stop"]:
+                            return
+                        if not line:
+                            continue
+                        data = json.loads(line)
+                        if data.get("error"):
+                            self.after(0, lambda e=data["error"]: ui(f"Errore: {e}"))
+                            return
+                        total, done = data.get("total"), data.get("completed")
+                        if total and done:
+                            txt = f"{done / 1e9:.2f} / {total / 1e9:.2f} GB"
+                            self.after(0, lambda t=txt, f=done / total: ui(t, f))
+                        elif data.get("status"):
+                            self.after(0, lambda s=data["status"]: ui(s))
+                        if data.get("status") == "success":
+                            break
+                self.after(0, lambda: (win.destroy() if win.winfo_exists() else None,
+                                       self.status.configure(text=f"Modello {model} pronto all'uso.")))
+            except Exception as e:
+                self.after(0, lambda: ui(f"Download non riuscito: {e}"))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # ------------------------------------------------------------ documenti
     def load_documents(self):
@@ -971,7 +1343,7 @@ class TALdocApp(ctk.CTk):
     def show_about(self):
         messagebox.showinfo("Informazioni",
             f"{APP_NAME}\n\nApp locale per interrogare documenti con AI.\n"
-            "Tutto avviene sul tuo PC.\n\nVersione 1.1 – nuova interfaccia grafica.")
+            "Tutto avviene sul tuo PC.\n\nVersione 1.2.")
 
 
 if __name__ == "__main__":
